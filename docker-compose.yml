@@ -1,0 +1,20 @@
+services:
+  kanban:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: kanban:latest
+    container_name: kanban
+    ports:
+      # Expose on all interfaces so other devices on the LAN can reach it.
+      # Change the left side to "127.0.0.1:3000:3000" to keep it local-only.
+      - "0.0.0.0:3000:3000"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

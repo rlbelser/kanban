@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
 
 const columns = [
   "To Do",
@@ -8,13 +9,27 @@ const columns = [
   "Blocked",
 ];
 
+// Adds a card to the given column (by index) via the on-screen form.
+async function addCard(
+  page: Page,
+  columnIndex: number,
+  title: string,
+  details = ""
+) {
+  const column = page.getByTestId("column").nth(columnIndex);
+  await column.getByTestId("add-card-btn").click();
+  await column.getByTestId("add-title").fill(title);
+  if (details) await column.getByTestId("add-details").fill(details);
+  await column.getByTestId("add-submit").click();
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("column-name").first()).toBeVisible();
 });
 
 test.describe("board renders", () => {
-  test("shows exactly 5 columns with dummy data", async ({ page }) => {
+  test("shows exactly 5 columns with the default names", async ({ page }) => {
     const names = page.getByTestId("column-name");
     await expect(names).toHaveCount(5);
     for (let i = 0; i < columns.length; i++) {
@@ -22,24 +37,17 @@ test.describe("board renders", () => {
     }
   });
 
-  test("shows 9 cards total across the board", async ({ page }) => {
-    const total = await page
-      .getByTestId("column-name")
-      .evaluateAll((els) => els.length);
-    expect(total).toBe(5);
+  test("loads empty with no cards", async ({ page }) => {
     const counts = await page
       .getByTestId("column-count")
-      .evaluateAll((els) =>
-        els.map((el) => Number(el.textContent))
-      );
-    expect(counts.reduce((a, b) => a + b, 0)).toBe(9);
+      .evaluateAll((els) => els.map((el) => Number(el.textContent)));
+    expect(counts.reduce((a, b) => a + b, 0)).toBe(0);
   });
 
   test("renders a card with its title and details", async ({ page }) => {
+    await addCard(page, 0, "Draft launch plan", "Outline the rollout timeline");
     await expect(page.getByText("Draft launch plan")).toBeVisible();
-    await expect(
-      page.getByText("Outline the rollout timeline")
-    ).toBeVisible();
+    await expect(page.getByText("Outline the rollout timeline")).toBeVisible();
   });
 });
 
@@ -82,7 +90,7 @@ test.describe("add card", () => {
 test.describe("delete card", () => {
   test("deletes a card and it disappears", async ({ page }) => {
     const title = "Draft launch plan";
-    await expect(page.getByText(title)).toBeVisible();
+    await addCard(page, 0, title);
 
     // Delete the button inside the card that holds this title.
     const card = page.locator(".card", { has: page.getByText(title) });
@@ -94,6 +102,7 @@ test.describe("delete card", () => {
 
 test.describe("edit card", () => {
   test("opens the dialog, edits title, and saves", async ({ page }) => {
+    await addCard(page, 0, "Draft launch plan");
     await page.getByText("Draft launch plan").click();
     const titleInput = page.getByTestId("edit-title");
     await expect(titleInput).toBeVisible();
@@ -107,6 +116,7 @@ test.describe("edit card", () => {
   });
 
   test("cancels without saving", async ({ page }) => {
+    await addCard(page, 0, "Draft launch plan");
     await page.getByText("Draft launch plan").click();
     await page.getByTestId("edit-title").fill("Should not persist");
     await page.getByRole("button", { name: "Cancel" }).click();
@@ -119,6 +129,11 @@ test.describe("drag and drop", () => {
   test("moves a card to another column", async ({ page }) => {
     const sourceTitle = "Draft launch plan";
     const targetName = "In Progress";
+
+    // Seed one card in each of the first two columns so there is a source
+    // card and a visible drop target in the destination column.
+    await addCard(page, 0, sourceTitle);
+    await addCard(page, 1, "Design dashboard widgets");
 
     const sourceCard = page.getByText(sourceTitle);
     const targetColumn = page.getByRole("textbox", { name: `Rename column ${targetName}` });
@@ -159,6 +174,12 @@ test.describe("drag and drop", () => {
     const column1 = page.getByTestId("column").first(); // To Do
     const titleA = "Draft launch plan";
 
+    // Seed three cards in To Do so there is a first card to drag and a
+    // third card to drag past.
+    await addCard(page, 0, titleA);
+    await addCard(page, 0, "Second card");
+    await addCard(page, 0, "Third card");
+
     const sourceCard = column1.locator(".card", {
       has: page.getByText(titleA, { exact: true }),
     });
@@ -180,5 +201,76 @@ test.describe("drag and drop", () => {
     for (let i = 1; i < 5; i++) {
       await expect(page.getByTestId("column").nth(i)).not.toContainText(titleA);
     }
+  });
+});
+
+test.describe("persistence", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+    await page.evaluate(() => window.localStorage.clear());
+    await page.reload();
+    await expect(page.getByTestId("column-name").first()).toBeVisible();
+  });
+
+  test("saves the board and restores it on reload", async ({ page }) => {
+    await addCard(page, 0, "Persisted card", "Should survive a reload");
+    await expect(page.getByText("Persisted card")).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByText("Persisted card")).toBeVisible();
+    await expect(page.getByText("Should survive a reload")).toBeVisible();
+  });
+
+  test("exports the board as a downloadable JSON file", async ({ page }) => {
+    await addCard(page, 0, "Export me");
+
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByTestId("export-btn").click(),
+    ]);
+    expect(download.suggestedFilename()).toBe("kanban-board.json");
+
+    type TestCard = { id: string; title: string; details: string };
+    type TestColumn = { id: string; name: string; cards: TestCard[] };
+    const content = JSON.parse(
+      readFileSync(await download.path(), "utf8")
+    ) as { columns: TestColumn[] };
+    expect(content.columns).toHaveLength(5);
+    const todo = content.columns.find((c) => c.name === "To Do");
+    expect(todo?.cards.some((c) => c.title === "Export me")).toBe(true);
+  });
+
+  test("imports a board from a JSON file", async ({ page }) => {
+    const board = {
+      columns: [
+        { id: "a", name: "Col A", cards: [{ id: "1", title: "Imported", details: "" }] },
+        { id: "b", name: "Col B", cards: [] },
+        { id: "c", name: "Col C", cards: [] },
+        { id: "d", name: "Col D", cards: [] },
+        { id: "e", name: "Col E", cards: [] },
+      ],
+    };
+
+    const input = page.getByTestId("import-file");
+    await input.setInputFiles({
+      name: "board.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(board)),
+    });
+
+    await expect(page.getByText("Imported")).toBeVisible();
+    await expect(page.getByTestId("column-name")).toHaveCount(5);
+  });
+
+  test("rejects an invalid file without changing the board", async ({ page }) => {
+    const input = page.getByTestId("import-file");
+    const dialog = page.once("dialog", (d) => d.dismiss());
+    await input.setInputFiles({
+      name: "bad.json",
+      mimeType: "application/json",
+      buffer: Buffer.from("not a board"),
+    });
+    await dialog;
+    await expect(page.getByText("not a board")).toHaveCount(0);
   });
 });

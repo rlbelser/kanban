@@ -1,13 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   moveCard,
   moveCardToColumn,
   renameColumn,
   addCardToColumn,
 } from "../lib/board";
-import { initialBoard } from "../lib/dummyData";
+import {
+  loadSavedBoard,
+  saveBoard,
+  serializeBoard,
+  parseBoardText,
+  EXPORT_FILENAME,
+} from "../lib/persist";
 import type { Board } from "../lib/types";
 import BoardView from "../components/BoardView";
 import EditDialog from "../components/EditDialog";
@@ -20,13 +26,52 @@ function makeId(): string {
   return "id-" + Math.random().toString(36).slice(2, 10);
 }
 
+const emptyBoard: Board = {
+  columns: [
+    { id: "col-1", name: "To Do", cards: [] },
+    { id: "col-2", name: "In Progress", cards: [] },
+    { id: "col-3", name: "Review", cards: [] },
+    { id: "col-4", name: "Done", cards: [] },
+    { id: "col-5", name: "Blocked", cards: [] },
+  ],
+};
+
 export default function Home() {
-  const [board, setBoard] = useState<Board>(initialBoard);
+  // Start empty so the server render and the first client render match. The
+  // saved board is restored after mount (client only), so there is no
+  // hydration mismatch.
+  const [board, setBoard] = useState<Board>(emptyBoard);
   const [activeCardId, setActiveCardId] = useState<string | null>(null);
   const [editing, setEditing] = useState<{
     columnId: string;
     cardId: string;
   } | null>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
+  // True once the board that is currently rendered matches what we last saved
+  // (or the empty initial board). Until then we must not write, otherwise the
+  // first paint would clobber the stored board with the pre-restore state.
+  const inSyncRef = useRef(true);
+  const pendingBoardRef = useRef<Board | null>(null);
+
+  useEffect(() => {
+    const saved = loadSavedBoard();
+    if (saved) {
+      pendingBoardRef.current = saved;
+      inSyncRef.current = false;
+      setBoard(saved);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (pendingBoardRef.current === board) {
+      // This render is the restored board; mark it as the new baseline.
+      pendingBoardRef.current = null;
+      inSyncRef.current = true;
+      return;
+    }
+    if (!inSyncRef.current) return;
+    saveBoard(board);
+  }, [board]);
 
   function columnOf(id: string): string | null {
     if (board.columns.some((c) => c.id === id)) return id;
@@ -95,6 +140,29 @@ export default function Home() {
     setEditing(null);
   }
 
+  function handleExport() {
+    const blob = new Blob([serializeBoard(board)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = EXPORT_FILENAME;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleImportFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const parsed = parseBoardText(String(reader.result));
+      if (parsed) setBoard(parsed);
+      else alert("That file is not a valid board.");
+    };
+    reader.readAsText(file);
+  }
+
   const editingCard = editing
     ? board.columns
         .find((c) => c.id === editing.columnId)
@@ -108,6 +176,32 @@ export default function Home() {
         <p className="app-subtitle">
           Drag cards between columns. Click a card title to edit it.
         </p>
+        <div className="header-actions">
+          <button
+            type="button"
+            className="add-btn"
+            data-testid="import-btn"
+            onClick={() => importInputRef.current?.click()}
+          >
+            Import
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            data-testid="export-btn"
+            onClick={handleExport}
+          >
+            Export
+          </button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json"
+            data-testid="import-file"
+            hidden
+            onChange={handleImportFile}
+          />
+        </div>
       </header>
       <BoardView
         board={board}
